@@ -1,8 +1,8 @@
 #ML
 from keras.applications import densenet
-from keras.layers import Input, Flatten, Conv2D, MaxPooling2D, LSTM, Reshape, TimeDistributed, Dense, Activation, Permute, Embedding, RepeatVector, Add
+from keras.layers import Input, Flatten, Conv2D, MaxPooling2D, LSTM, Reshape, TimeDistributed, Dense, Activation, Permute, Embedding, BatchNormalization, Multiply 
 from keras.models import Model
-from keras.callbacks import EarlyStopping, ModelCheckpoint
+from keras.callbacks import EarlyStopping, ModelCheckpoint, CSVLogger
 from keras.optimizers import Adadelta
 import keras
 import keras.backend as K
@@ -97,7 +97,7 @@ def build_encoder_decoder():
     max_pool_3 = MaxPooling2D(pool_size=(2, 2), strides=None, padding="same", data_format="channels_last")(batch_2)
 
     conv_2d_6 = Conv2D(16, kernel_size=(3, 3), strides=1, padding="same")(max_pool_3)
-    conv_2d_7 = Conv2D(16, kernel_size=(1, 1), padding="same")(conv_2d_6))
+    conv_2d_7 = Conv2D(16, kernel_size=(1, 1), padding="same")(conv_2d_6)
     batch_3 = BatchNormalization()(conv_2d_4)
     max_pool_4 = MaxPooling2D(pool_size=(2, 2), strides=None, padding="same", data_format="channels_last")(batch_3)
 
@@ -111,7 +111,7 @@ def build_encoder_decoder():
     embedding = Embedding(n_classes, 16)(decoder_inputs)
 
     decoder_lstm = LSTM(max_seq_length, return_sequences=True)
-    concat = Add()([perm_2, embedding])
+    concat = Multiply()([perm_2, embedding])
     decoder_outputs= decoder_lstm(concat)
     time_distr_lstm= TimeDistributed(Dense(n_classes, activation='softmax'))(decoder_outputs)
     
@@ -138,7 +138,7 @@ def read_img_data(source_df):
         
             #binarize
             ret, thresh = cv2.threshold(gray, 127,255,cv2.THRESH_BINARY_INV)
-            new_arr = np.array(thresh)[:,:,np.newaxis]
+            new_arr = np.array(thresh)[:,:,np.newaxis] # because CNN expects four dimensional output: (batch_size, h, w, channels); current output is merely (batch_size, h, w)
             imgs.append(new_arr)
         sys.stdout.write("\n")
         print("Saving image data...")
@@ -200,13 +200,15 @@ decoder_target[max_seq_length] = pd.Series(np.array([token_unk] * len(df_encodin
 print(decoder_target.head())
 
 # train model
+model_creation_time = time.time()
 ed.fit(train_data, keras.utils.np_utils.to_categorical(decoder_target.to_numpy('int64')), batch_size=8, epochs=100, validation_split=0.2, callbacks=[
     EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=10),
-    ModelCheckpoint('unfinished_best_model.h5', monitor='val_loss', mode='min', save_best_only=True)    
+    ModelCheckpoint('./models/unfinished_best_model_{}.h5'.format(model_creation_time), monitor='val_loss', mode='min', save_best_only=True),
+    CSVLogger('./training_logs/model_{}.csv'.format(model_creation_time))
     ])
 
 # save model
-ed.save('kuzushiji_cnn_lstm.h5')
+ed.save('./models/kuzushiji_cnn_lstm_{}.h5'.format(model_creation_time))
 
 # evaluate model
 
