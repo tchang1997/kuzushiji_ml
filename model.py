@@ -21,16 +21,13 @@ import sys
 import time
 import datetime
 
-# Settings
-import tensorflow as tf
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
 # Constants
 data_path = "/Users/tchainzzz/python/kuzushiji_ml/"
 img_path = data_path + "input/"
-OOV = "U+22999"
+START = 1
+END = 2
+OOV = 3
 tqdm.pandas(desc="Progress")
-
 
 def seq_length(seq):
     try:
@@ -46,16 +43,18 @@ df_train = df.sample(frac=0.8,random_state=42).reset_index()
 df_test=df.drop(df_train.index).reset_index()
 df_chars = pd.read_csv(data_path + 'unicode_translation.csv')
 char_dict = {codepoint: char for codepoint, char in df_chars.values}
-n_classes = len(char_dict)
+n_classes = len(char_dict) + 3
 img_size = (512, 512, 1)
 max_seq_length = 256 # max(df_train['labels'].apply(seq_length))
-token_unk = 9
 
 def one_hot(seq):
     encoding = list()
     for ch in seq:
         vector = [0 for _ in range(n_classes)]
-        vector[df_chars[df_chars['Unicode'] == ch].index[0]] = 1
+        try:
+            vector[df_chars[df_chars['Unicode'] == ch].index[0] + 3] = 1
+        except IndexError:
+            vector[OOV] = 1
         encoding.append(vector)
         return np.array(encoding)
 
@@ -63,15 +62,18 @@ def inverse_one_hot(matrix):
     return [np.argmax(vec) for vec in matrix]
 
 def seq_to_vec(seq):
-    embedding = []
-    for ch in seq: 
-        embedding.append(df_chars[df_chars['Unicode'] == ch].index[0])
-    if len(embedding) <= max_seq_length:
-        embedding += [token_unk] * (max_seq_length - len(embedding))
-    elif len(embedding) > max_seq_length:
-        embedding = embedding[:max_seq_length]
-    if len(embedding) != max_seq_length: print(len(embedding))
-    return np.array(embedding)
+    embedding = [START]
+    for ch in seq:
+        try:
+            embedding.append(df_chars[df_chars['Unicode'] == ch].index[0] + 3) # 3 is the number of special tags: start symbol, end symbol, and OOV
+        except IndexError:
+            embedding.append(OOV)
+    if len(embedding) <= max_seq_length - 1:
+        embedding += [OOV] * (max_seq_length - 1 - len(embedding))
+    elif len(embedding) > max_seq_length-1:
+        embedding = embedding[:max_seq_length-1]
+    if len(embedding) != max_seq_length-1: print(len(embedding))
+    return np.array(embedding + [END])
 
 def vec_to_seq(seq):
     vec = []
@@ -80,6 +82,14 @@ def vec_to_seq(seq):
             vec.append(df_chars.iloc[int(n)]['Unicode'])
     return vec
 
+"""
+    The architecture of this model was largely inspired by the following papers:
+    [1] Le, A.D. Clanuwat, T., Kitamoto, A. (2019). A Human-Inspired Recognition System for Pre-Modern Japanese Historical Documents. Via IEEEAccess.
+
+    The optimization algorithm was informed by the following paper:
+    [2] Ruder, S. (2017) An overview of gradient descent optimization algorithms.Via arXiv:1609.04747v2.
+
+"""
 def build_encoder_decoder():
     input_layer= Input(shape=img_size)
 
@@ -103,23 +113,35 @@ def build_encoder_decoder():
 
     # janky dimensional reduction 
     perm_1 = Permute((3, 2, 1))(max_pool_4)
-    reshaper_1 = Reshape((16, -1))(perm_1)
+    reshaper_1 = Reshape((16, -1))(perm_1) # 16 is the number of channels coming out of max_pool_4.
     fc_1 = Dense(max_seq_length)(reshaper_1)
     perm_2 = Permute((2, 1))(fc_1)
 
+ 
     decoder_inputs = Input(shape=(max_seq_length,))
-    embedding = Embedding(n_classes, 16)(decoder_inputs)
+    embedding = Embedding(n_classes, 16)(decoder_inputs) # match dimensions of CNN output in the embedding to allow merging
 
-    decoder_lstm = LSTM(max_seq_length, return_sequences=True)
+    decoder_lstm = LSTM(max_seq_length, return_sequences=True, return_state=True)    
     concat = Multiply()([perm_2, embedding])
-    decoder_outputs= decoder_lstm(concat)
-    time_distr_lstm= TimeDistributed(Dense(n_classes, activation='softmax'))(decoder_outputs)
+    decoder_outputs, lstm_h, lstm_c = decoder_lstm(concat) # we will need to worry about the sequences and states in the inference loop
+
+    # use lstm_h to compute attention in tandem with the feature maps returned by max_pool_4 (batch_size, w, h, c) <op> lstm_h (seq_length, seq_length)
+    attention_base = Activation('softmax')(max_pool_4)
+    downsample = Reshape((max_seq_length, -1))(attention_base)
+    attention_dense = Dense(max_seq_length)(downsample)
+    decoder_with_attention = Multiply()([attention_dense, decoder_outputs])
+
+    time_distr_lstm= TimeDistributed(Dense(n_classes, activation='softmax'))(decoder_with_attention)
     
 
     model= Model(inputs=[input_layer, decoder_inputs], outputs=time_distr_lstm)
     model.compile(Adadelta(rho=0.95, epsilon=1e-8), loss='categorical_crossentropy', metrics=['accuracy'])
     return model
 
+"""
+    Images were preprocessed by loading in grayscale followed by binarization. A Hough transform was used to detect and remove some visually linear features deemed extraneous for feature extraction. Methodology informed by:
+    [3] Likforman-Sulem, L., Zahour, A., and Taconet, B. (2006). Text Line Segmentation of Historical Documents: a Survey. In  Special Issue on Analysis of Historical Documents, International Journal on Document Analysis and Recognition, Springer.
+"""
 image_array_path = "./image_np_array.pkl"
 def read_img_data(source_df):
     imgs = []
@@ -152,7 +174,7 @@ def read_img_data(source_df):
 
 def seq_from_dataframe_row(elem):
     try:
-        return elem.split()[::5]
+        return elem.split()[::5] 
     except AttributeError:
         return [OOV] * max_seq_length
     except IndexError:
@@ -163,7 +185,7 @@ def vec_no_pos_from_dataframe_row(elem):
 
 def shift_vec_one_earlier(elem):
     concat = np.array(elem[1:])
-    np.append(concat, token_unk)
+    np.append(concat, [END])
     return concat
 
 dataframe_with_encodings_path = './df_train_encoded.csv'
@@ -196,11 +218,12 @@ print(df_encodings.head())
 train_data = [read_img_data(df_train), df_encodings.astype('int64')]
 print("Shifting vectors one timestep ahead...")
 decoder_target = df_encodings.drop(df_encodings.columns[0], axis=1)
-decoder_target[max_seq_length] = pd.Series(np.array([token_unk] * len(df_encodings.index)))
+decoder_target[max_seq_length] = pd.Series(np.array([OOV] * len(df_encodings.index)))
 print(decoder_target.head())
 
 # train model
 model_creation_time = time.time()
+# [image, numerical_vector_sequence] => [one_hot_sequence_encoding]
 ed.fit(train_data, keras.utils.np_utils.to_categorical(decoder_target.to_numpy('int64')), batch_size=8, epochs=100, validation_split=0.2, callbacks=[
     EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=10),
     ModelCheckpoint('./models/unfinished_best_model_{}.h5'.format(model_creation_time), monitor='val_loss', mode='min', save_best_only=True),
@@ -209,6 +232,7 @@ ed.fit(train_data, keras.utils.np_utils.to_categorical(decoder_target.to_numpy('
 
 # save model
 ed.save('./models/kuzushiji_cnn_lstm_{}.h5'.format(model_creation_time))
+keras.utils.plot_model(model, to_file='./models/kuzushiji_cnn_lstm_plot_{}.h5')
 
 # evaluate model
 
