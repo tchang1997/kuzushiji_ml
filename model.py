@@ -11,6 +11,8 @@ import keras.backend as K
 import pandas as pd
 import numpy as np
 import cv2
+from keras.preprocessing.text import Tokenizer
+from keras.preprocessing.sequence import pad_sequences as SequencePadding
 
 # File I/O
 from tqdm import tqdm
@@ -43,7 +45,6 @@ df_train = df.sample(frac=0.8,random_state=42).reset_index()
 df_test=df.drop(df_train.index).reset_index()
 df_chars = pd.read_csv(data_path + 'unicode_translation.csv')
 char_dict = {codepoint: char for codepoint, char in df_chars.values}
-n_classes = len(char_dict) + 3
 img_size = (512, 512, 1)
 max_seq_length = 256 # max(df_train['labels'].apply(seq_length))
 
@@ -118,7 +119,7 @@ def build_encoder_decoder():
     perm_2 = Permute((2, 1))(fc_1)
 
  
-    decoder_inputs = Input(shape=(max_seq_length,))
+    decoder_inputs = Input(shape=(max_seq_length, ))
     embedding = Embedding(n_classes, 16)(decoder_inputs) # match dimensions of CNN output in the embedding to allow merging
 
     decoder_lstm = LSTM(max_seq_length, return_sequences=True, return_state=True)    
@@ -176,9 +177,9 @@ def seq_from_dataframe_row(elem):
     try:
         return elem.split()[::5] 
     except AttributeError:
-        return [OOV] * max_seq_length
+        return ['?'] * max_seq_length
     except IndexError:
-        return [OOV] * max_seq_length
+        return ['?'] * max_seq_length
 
 def vec_no_pos_from_dataframe_row(elem):
     return seq_to_vec(seq_from_dataframe_row(elem))
@@ -191,35 +192,39 @@ def shift_vec_one_earlier(elem):
 dataframe_with_encodings_path = './df_train_encoded.csv'
 def get_encoding_from_dataframe(source_df, save_path=dataframe_with_encodings_path):
     print("Vectorizing unicode sequences...")
-    df_encodings = pd.DataFrame(columns=range(max_seq_length))
-    start = time.time()
-    for i, row in source_df.iterrows():
-        # progress bar
-        eta = (len(source_df.index)-(i+1)) / ((i+1)/(time.time() - start))
-        sys.stdout.write("\rVectorizing line ({}/{}), {:.6s}/s, ETA: {:02d}:{:02d}".format(i+1, len(source_df.index), "{:0.4f}".format((i+1)/(time.time() - start)), int(eta // 60) % 60, int(eta) % 60))
-        df_encodings.loc[i] = vec_no_pos_from_dataframe_row(source_df.iloc[i]['labels'])
-    sys.stdout.write("\n")
+    tokenizer = Tokenizer(char_level=True, oov_token="?")
+    raw_unicode_sequences = source_df['labels'].progress_apply(seq_from_dataframe_row)
+    print("Building word index...")
+    tokenizer.fit_on_texts(raw_unicode_sequences)
+    print("Saving word index...")
+    with open("./word_index.csv", "w") as f:
+        for k in tokenizer.word_index.keys():
+            f.write(str(k) + "," + str(tokenizer.word_index[k]) + "\n")
+    print("Applying word index...")
+    sequences = tokenizer.texts_to_sequences(raw_unicode_sequences)
+    start = len(tokenizer.word_index)
+    end = len(tokenizer.word_index) + 1
+    sequences = [[start] + seq + [end] for seq in sequences] 
+    padded_sequences = SequencePadding(sequences, maxlen=max_seq_length, padding='post', truncating='post', value=0.0)
     print("Saving csv...")
+    df_encodings = pd.DataFrame(padded_sequences)
     df_encodings.to_csv(dataframe_with_encodings_path)
-    return df_encodings
+    return df_encodings, len(tokenizer.word_index) + 2
+
+# preprocess data
+print("Loading vectorized unicode sequences...")
+df_encodings, n_classes = get_encoding_from_dataframe(df_train)
+print(df_encodings.head())
+train_data = [read_img_data(df_train), df_encodings.astype('int64')]
+print("Shifting vectors one timestep ahead...")
+decoder_target = df_encodings.drop(df_encodings.columns[0], axis=1)
+decoder_target[max_seq_length] = pd.Series(np.array([0] * len(df_encodings.index)))
+print(decoder_target.head())
 
 # compile model
 ed = build_encoder_decoder()
 ed.summary()
 print()
-
-# preprocess data
-if not os.path.exists(dataframe_with_encodings_path):
-    df_encodings = get_encoding_from_dataframe(df_train)
-else:
-    print("Loading vectorized unicode sequences...")
-    df_encodings = pd.read_csv(dataframe_with_encodings_path, header=0, index_col=0)
-print(df_encodings.head())
-train_data = [read_img_data(df_train), df_encodings.astype('int64')]
-print("Shifting vectors one timestep ahead...")
-decoder_target = df_encodings.drop(df_encodings.columns[0], axis=1)
-decoder_target[max_seq_length] = pd.Series(np.array([OOV] * len(df_encodings.index)))
-print(decoder_target.head())
 
 # train model
 model_creation_time = time.time()

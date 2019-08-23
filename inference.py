@@ -7,17 +7,22 @@ import pickle
 
 import sys
 
+
+from keras.preprocessing.sequence import pad_sequences as SequencePadding
+
 n = int(sys.argv[1])
 
 data_path = "/Users/tchainzzz/python/kuzushiji_ml/"
 img_path = data_path + "input/"
 image_array_path = "./image_np_array.pkl"
-START = 1
-END = 2
-OOV = 3
+START = 4051
+END = 4052
 max_seq_length = 256 
 
-df_chars = pd.read_csv(data_path + 'unicode_translation.csv')
+df_chars = pd.read_csv(data_path + "unicode_translation.csv")
+word_index = dict()
+with open('./word_index.csv') as f:
+    word_index = {int(kv.split(",")[1]): kv.split(",")[0] for kv in list(f)}
 df = pd.read_csv(data_path + 'train.csv')
 print("Loading image information from file...")
 with open(image_array_path, "rb") as f:
@@ -25,7 +30,7 @@ with open(image_array_path, "rb") as f:
 input_image = imgs[n]
 input_image = input_image[np.newaxis, :]
 target_seq = df.iloc[n]['labels'].split()[::5]
-n_classes = len(df_chars) + 3
+n_classes = len(word_index) + 2
 
 def print_model(model, title="Model:", sep="=", width=25):
     print(title)
@@ -58,23 +63,33 @@ print_model(decoder_model, title="Modified decoder:")
 #image_tensor = encoder.predict(input_image)
 # extract and setup decoder
 
+msg = ''.join([df_chars.loc[df_chars['Unicode']==char].iloc[0]['char'] for char in target_seq])
+
+
 # decoding loop
-target = np.full((1, max_seq_length), END)
-target[0] = START
-decoded = np.array([])
-encoder_output = encode_and_transform.predict([input_image, target])
+target_sequence = np.full((1, max_seq_length), 0.0)
+target_sequence[0] = START
+decoded = np.array([START])
+encoder_output = encode_and_transform.predict([input_image, target_sequence])
 decoder_inner_state = [np.zeros((1, max_seq_length)), np.zeros((1, max_seq_length))]
 print("Predicted:")
+curr_idx = 0
 while True: 
-    result, h, c = decoder_model.predict([encoder_output] + decoder_inner_state)
-    index_of_max = result[0][-1].argsort()[-1]
+    result, h, c = decoder_model.predict([encoder_output] + decoder_inner_state) 
+    index_of_max = result[0][-1].argsort()[-5:]
     decoded = np.append(decoded, index_of_max)
-    sys.stdout.write(df_chars.iloc[int(decoded[-1]) + 3]['char'])
+    if len(decoded) >= max_seq_length or int(decoded[-1]) is END:
+         break
+    characters_of_max = [df_chars.loc[df_chars['Unicode']==word_index[i].upper()]['char'].iloc[0] for i in index_of_max]
+    sys.stdout.write(' '.join(characters_of_max))
+    sys.stdout.write("\t")
+    sys.stdout.write(msg[curr_idx])
+    sys.stdout.write("\n")
     sys.stdout.flush()
     target = np.append(decoded, np.full((1, max_seq_length), END))[:max_seq_length]
     decoder_inner_state = [h, c]
-    if len(decoded) >= max_seq_length or int(decoded[-1]) in [END, OOV]:
-        break
+    curr_idx += 1
+
 print()
 print("Expected:")
-print(''.join([df_chars.loc[df_chars['Unicode']==char].iloc[0]['char'] for char in target_seq]))
+print(msg)
