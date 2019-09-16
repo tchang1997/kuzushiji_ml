@@ -3,3 +3,4 @@
 *.*.sw*
 *.csv
 __pycache__
+*.pkl
