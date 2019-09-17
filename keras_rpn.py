@@ -18,6 +18,7 @@ from keras import backend as K
 from losses import rpn_reg_loss, rpn_cls_loss, full_model_classifier_loss, full_model_regression_loss
 from config import Settings
 from roi_max_pool import ROIMaxPool
+from labeling import DataProvider
 
 # A tuple of (height, width, channels). Thus data_format needs to be set to 'channels_last' when needed.
 C = Settings()
@@ -32,7 +33,7 @@ def vgg_base(shape_tuple):
 
 def rpn(shared_layers):
     # here's the RPN layers
-    sliding_window = Conv2D(512, kernel_size=(3,3), strides=1, activation='relu', kernel_initializer=RandomNormal(mean=0.0, stddev=0.01), data_format='channels_last', name='intermediate_conv1')(shared_layers.output)
+    sliding_window = Conv2D(512, kernel_size=(3,3), padding="same", activation='relu', kernel_initializer=RandomNormal(mean=0.0, stddev=0.01), data_format='channels_last', name='intermediate_conv1')(shared_layers.output)
 
     # 4 * num_anchors (x+y+w+h wrt ea. anchor) for reg with (1,1) kernel
     # 2 * num_anchors (p_obj and ~p_obj) for cls, (1,1) kernel
@@ -76,14 +77,15 @@ def classifier_layer(shared_layers, rois, num_rois, n_classes):
         class still encodes a valid object. 
     """
 
-    final_cls = TimeDistributed(Dense(C._n_classes, activation='softmax', kernel_initializer='zero'), name='dense_categorical_classifier')(output)
-    final_reg = TimeDistributed(Dense(4 * (C._n_classes - 1), activation='linear', kernel_initializer='zero'), name='dense_bbox_regressor')(output)
+    final_cls = TimeDistributed(Dense(data.n_classes, activation='softmax', kernel_initializer='zero'), name='dense_categorical_classifier')(output)
+    final_reg = TimeDistributed(Dense(4 * (data.n_classes - 1), activation='linear', kernel_initializer='zero'), name='dense_bbox_regressor')(output)
     # don't forget the -1: we don't do a regression box for the implicit background class!
 
     return [final_cls, final_reg]
 
+data = DataProvider()
 
-roi_input = Input(shape=(C._num_rois, 4))
+roi_input = Input(shape=(C._max_num_rois, 4))
 nn_base = vgg_base(shape_tuple=C._img_size)
 rpn_layer = rpn(nn_base)
 
@@ -91,8 +93,8 @@ rpn_model = Model(inputs=nn_base.input, outputs=rpn_layer, name="region_proposal
 rpn_model.compile(optimizer='sgd', loss=[rpn_cls_loss(C._num_anchors), rpn_reg_loss(C._num_anchors)])
 rpn_model.summary()
 
-classifier = classifier_layer(nn_base, roi_input, C._num_rois, C._n_classes)
+classifier = classifier_layer(nn_base, roi_input, C._max_num_rois, data.n_classes)
 big_boi_classifier = Model(inputs=[nn_base.input, roi_input], outputs=classifier, name="roi_fast_rcnn_classifier")
-big_boi_classifier.compile(optimizer='sgd', loss=[full_model_classifier_loss(), full_model_regression_loss(C._n_classes)])
+big_boi_classifier.compile(optimizer='sgd', loss=[full_model_classifier_loss(), full_model_regression_loss(data.n_classes)])
 big_boi_classifier.summary()
 

@@ -10,11 +10,10 @@ class Settings():
         # Main network setup
 
         self._anchor_box_scales = [32, 64, 128]
-        self._img_size = (512, 512, 3)
+        self._img_size = (512, 768, 3)
         self._anchor_box_ratios = [[1, 1], [1 / math.sqrt(2), 2 / math.sqrt(2)], [2 / math.sqrt(2), 1 / math.sqrt(2)]]
         self._num_anchors = len(self._anchor_box_scales) * len(self._anchor_box_ratios)
-        self._n_classes = 4000
-        self._num_rois = 128
+        self._max_num_rois = 128
 
         # Losses
 
