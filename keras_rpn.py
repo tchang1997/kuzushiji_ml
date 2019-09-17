@@ -13,11 +13,11 @@ from keras.applications.vgg16 import VGG16
 from keras.initializers import RandomNormal
 from keras.layers import Input, Conv2D, TimeDistributed, Dense, Flatten, Dropout
 from keras.models import Model
-from keras_frcnn import ROIMaxPool
 from keras import backend as K
 
 from losses import rpn_reg_loss, rpn_cls_loss, full_model_classifier_loss, full_model_regression_loss
 from config import Settings
+from roi_max_pool import ROIMaxPool
 
 # A tuple of (height, width, channels). Thus data_format needs to be set to 'channels_last' when needed.
 C = Settings()
