@@ -21,15 +21,6 @@ import pickle
 from progress import ProgressTracker # this is a custom module I wrote to track progress when doing work across an iterable
 from config import Settings
 
-from enum import Enum, auto
-
-@unique
-class Object(Enum):
-    POS = auto()
-    NONE = auto()
-    NEG = auto()
-
-
 """
     Utility function for calculating IoU (intersection over union) scores for bounding box overlap. Used to generate ground-truth labels. From RockyXu66's Jupyter notebook.
 """
@@ -222,18 +213,18 @@ class DataProvider():
             gt_box_coordinates[bbox_index, 0] = bbox_info[1] * resized_img_width / float(width)
             gt_box_coordinates[bbox_index, 1] = bbox_info[2] * resized_img_height / float(height)
             gt_box_coordinates[bbox_index, 2] = bbox_info[3] * resized_img_height / float(height) + gt_box_coordinates[bbox_index, 1]
-            gt_box_coordinates[bbox_index, 3] = bbox_info[4] * resized_img_width / float(width) + gt_box_coordiantes[bbox_index, 0]
+            gt_box_coordinates[boox_index, 3] = bbox_info[4] * resized_img_width / float(width) + gt_box_coordiantes[bbox_index, 0]
 
         # auxilliary structures for mapping each ground-truth bounding box to its best anchor
-        best_anchor_for_bbox = -1 * np.ones((num_bboxes, 4)).astype(int) # indexed by bbox number. 2nd dim is (y-loc, x-loc, anchor_scale_idx, anchor_aspect_ratio_idx)
+        best_anchor_for_bbox = -1 * np.ones((num_bboxes, 4)).astype(int) # (x-loc, y-loc, anchor_scale_idx, anchor_aspect_ratio_idx)
         best_iou_for_bbox = np.zeros(num_bboxes).astype(np.float32)
         best_coordinates_for_bbox = np.zeros((num_bboxes, 4)).astype(int) 
         best_targets_for_bbox = np.zeros((num_bboxes, 4)).astypte(np.float32)
-        n_anchors_per_bbox = np.zeros(num_bboxes).astype(int)
 
-        # for each anchor shape...
-        for anchor_area_index, anchor_area in enumerate(C._anchor_box_scales):
-            for anchor_ratio_index, anchor_aspect_ratio in enumerate(C._anchor_box_ratios):
+
+        # for each anchor...
+        for anchor_area in C._anchor_box_scales:
+            for anchor_aspect_ratio in C._anchor_box_ratios:
                 # calculate anchor dimensions
                 anchor_width = anchor_area * anchor_aspect_ratio[0]
                 anchor_height = anchor_area * anchor_aspect_ratio[1]
@@ -253,7 +244,7 @@ class DataProvider():
 
                         if y_min < 0 or y_max > resized_img_height: continue
 
-                        bbox_type = Object.NEG
+                        bbox_type = 'neg'
                         best_iou_for_loc = 0.0
 
                         for bbox_index in range(gt_box_coordinates.shape[0]):
@@ -261,99 +252,12 @@ class DataProvider():
                                 gt_box_coordinates[bbox_index, 3], gt_box_coordinates[bbox_index, 2]], [x_min, y_min, x_max, y_max])
 
                             if curr_iou > C._iou_upper or curr_iou > best_iou_for_bbox[bbox_index]:
-                                """
-                                    There are two cases where we will use an anchor's regression target values. 
-                                    1) IoU > 0.7 or whatever threshold is defined
-                                    2) max IoU w.r.t. all bounding boxes 
                                 
-                                    Usually the bounding box that yields the best IoU for an anchor has IoU > 0.7, but in the case that
-                                    this doesn't happen, this helps make sure that each anchor has some target.
-                                    
-                                    See Ren et. al. (2016) pg. 5 for more details.
-
-                                """
-
-                                gt_box_x_center = (gt_box_coordinates[bbox_index, 3] + gt_box_coordinates[bbox_index, 0]) / 2
-                                gt_box_y_center = (gt_box_coordinates[bbox_index, 1] + gt_box_coordinates[bbox_index, 2]) / 2
-                                anchor_x_center = (x_max + x_min) / 2
-                                anchor_y_center = (y_max + y_min) / 2
-
-                                tx = (gt_box_x_center - anchor_x_center) / (x_max - x_min) 
-                                ty = (gt_box_y_center = anchor_y_center) / (y_max - y_min)
-                                tw = np.log((gt_box_coordinates[bbox_index, 3] - gt_box_coordinates[bbox_index, 0]) / (x_max - x_min))
-                                th = np.log((gt_box_coordinates[bbox_index, 2] - gt_box_coordinates[bbox_index, 1]) / (y_max - y_min)) 
-    
-                                """
-                                    Update our "best-so-far" bookkeeping structures...
-
-                                    If at the end of our run, the current bounding box doesn't have an anchor assigned to it, we'll assign the best one here.
-                                """
-                                if curr_iou > best_iou_for_bbox[bbox_index]:
-                                    best_anchor_for_bbox[bbox_index] = [jy, ix, anchor_area_index, anchor_ratio_index]
-                                    best_iou_for_bbox[bbox_index] = curr_iou
-                                    best_coordinates_for_bbox[bbox_index] = [x_min, x_max, y_min, y_max]
-                                    best_target_for_bbox[bbox_index] = [tx, ty, tw, th]
-
-                                """
-                                    Label object as positive and make relevant changes if IoU > 0.7...
-                                """
-                                if curr_iou > C._iou_upper:
-                                    bbox_type = Object.POS
-                                    n_anchors_per_bbox[bbox_index] += 1
-                                    if curr_iou > best_iou_for_loc:
-                                        best_iou_for_loc = curr_iou
-                                        best_reg_target = [tx, ty, tw, th]
-
-                                if C._iou_lower < curr_iou < C._iou_upper:
-                                    if bbox_type != Object.POS: 
-                                        bbox_type = Object.NONE # indeterminate object
-                           
-                            """
-                                Update ground-truth arrays for use in loss calculations.
-                            """
-                            composite_anchor_index = anchor_ratio_index + anchor_area_index * len(C._anchor_box_ratios)
-                            if bbox_type is Object.POS:
-                                y_is_valid[jy, ix, composite_anchor_index] = 1
-                                y_is_obj[jy, ix, composite_anchor_index] = 1
-                                reg_array_start_index = len(best_reg_target) * composite_anchor_index
-                                y_rpn_reg[jy, ix, reg_array_start_index:reg_array_start_index+4] = best_reg_target
-                            elif bbox_type is Object.NEG:
-                                y_is_valid[jy, ix, composite_anchor_index] = 1
-                                y_is_obj[jy, ix, composite_anchor_index] = 0
-                            else: # Object.NONE
-                                y_is_valid[jy, ix, composite_anchor_index] = 0
-                                y_is_obj[jy, ix, composite_anchor_index] = 0
-
-            """
-                One little issue: there is a small chance that a ground-truth box has no anchor assigned to it. This checks for that, and if no anchor is assigned to a
-                ground-truth bounding box, it assigns the best one and automatically marks it as valid and positive, setting the regression targets as well.
-
-                Unless the ground-truth box is nowhere near any anchors. That means you have bigger design flaws in your project to deal with.
-            """
-            for bbox_index in range(n_anchors_per_bbox.shape[0]):
-                if num_anchors_for_bbox[bbox_index] == 0:
-                    if best_anchor_for_bbox[bbox_index, 0] != -1:
-                        composite_anchor_index = best_anchor_for_bbox[bbox_index, 3] + best_anchor_for_bbox[bbox_index, 2] * len(C._anchor_box_ratios)
-                        y_loc = best_anchor_for_bbox[bbox_index, 0]
-                        x_loc = best_anchor_for_bbox[bbox_index, 1]
-                        y_is_valid[y_loc, x_loc, composite_anchor_index] = 1
-                        y_is_obj[y_loc, x_loc, composite_anchor_index] = 1
-                        y_rpn_reg[y_loc, x_loc, 4 * composite_anchor_index:4 * composite_anchor_index + 4] = best_targets_for_bbox[bbox_index, :]
-
-            """
-                We know that there are many more negative anchors than positive anchors, because given an image, it's unlikely that there are objects of interest
-                that overlap with that many anchored areas.
-
-                To avert this, we sample a certain amount of negative and positive anchors to balance these classes during RPN training, otherwise the binary 
-                classification gets real wonky real quick. Our anchor mask array, y_is_valid, makes this super easy. Simply set any value in the mask array to 0 and 
-                the corresponding anchor at the corresponding location no longer contributes to the training objective. 
-            """
-            
 
 
 
-def project_anchors_on_image(img, C):
 
 
-if  __name__ == '__main__':
+
+if __name__ == '__main__':
     d = DataProvider()

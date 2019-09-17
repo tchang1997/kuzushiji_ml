@@ -57,7 +57,7 @@ def rpn_reg_loss(num_anchors, weight=1.0): # weight isn't that big of a deal acc
 
     def rpn_reg_loss_calc(y_true, y_pred):
         smooth_l1_diff = _smooth_L1_tensor(y_true[:, :, :, 4 * num_anchors:] - y_pred) # this tensor, when summed, will give the smooth L1
-        n_reg = K.sum(C._epsilon + y_true[:, :, :, :4 * num_anchors]) # num of anchors that are legitimate
+        n_reg = K.sum(C._epsilon + y_true[:, :, :, :4 * num_anchors]) # num of anchors correspond to positive object labels
         return weight * K.sum(y_true[:, :, :, :4 * num_anchors] * smooth_l1_diff) / n_reg
 
     return rpn_reg_loss_calc
