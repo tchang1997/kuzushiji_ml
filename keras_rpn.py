@@ -89,6 +89,7 @@ roi_input = Input(shape=(C._max_num_rois, 4))
 nn_base = vgg_base(shape_tuple=C._img_size)
 rpn_layer = rpn(nn_base)
 
+
 rpn_model = Model(inputs=nn_base.input, outputs=rpn_layer, name="region_proposal")
 rpn_model.compile(optimizer='sgd', loss=[rpn_cls_loss(C._num_anchors), rpn_reg_loss(C._num_anchors)])
 rpn_model.summary()
