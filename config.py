@@ -9,7 +9,7 @@ class Settings():
 
         # Main network setup
 
-        self._anchor_box_scales = [32, 64, 128]
+        self._anchor_box_scales = [8, 16, 32]
         self._img_size = (512, 768, 3)
         self._anchor_box_ratios = [[1, 1], [1 / math.sqrt(2), 2 / math.sqrt(2)], [2 / math.sqrt(2), 1 / math.sqrt(2)]]
         self._num_anchors = len(self._anchor_box_scales) * len(self._anchor_box_ratios)
@@ -21,8 +21,8 @@ class Settings():
         #
         self._rpn_stride = 16
 
-        self._iou_upper = 0.7
-        self._iou_lower = 0.3
+        self._iou_upper = 0.6
+        self._iou_lower = 0.1
  
         # Losses
 

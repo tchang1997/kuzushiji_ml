@@ -19,47 +19,17 @@ import pickle
 
 from progress import ProgressTracker # this is a custom module I wrote to track progress when doing work across an iterable
 from config import Settings
+from labeling_utils import *
+from visualization import *
 
 from enum import Enum, auto, unique
+import matplotlib.pyplot as plt
 
 @unique
 class Object(Enum):
     POS = auto()
     NONE = auto()
     NEG = auto()
-
-
-"""
-    Utility function for calculating IoU (intersection over union) scores for bounding box overlap. Used to generate ground-truth labels. From RockyXu66's Jupyter notebook.
-"""
-
-
-def iou(a, b):
-
-    def union(au, bu, area_intersection):
-        area_a = (au[2] - au[0]) * (au[3] - au[1])
-        area_b = (bu[2] - bu[0]) * (bu[3] - bu[1])
-        area_union = area_a + area_b - area_intersection
-        return area_union
-
-    def intersection(ai, bi):
-        x = max(ai[0], bi[0])
-        y = max(ai[1], bi[1])
-        w = min(ai[2], bi[2]) - x
-        h = min(ai[3], bi[3]) - y
-        if w < 0 or h < 0:
-            return 0
-        return w*h
-
-    # a and b should be (x1,y1,x2,y2)
-
-    if a[0] >= a[2] or a[1] >= a[3] or b[0] >= b[2] or b[1] >= b[3]:
-        return 0.0
-
-    area_i = intersection(a, b)
-    area_u = union(a, b, area_i)
-
-    return float(area_i) / float(area_u + 1e-6)
 
 """
     Given a tensor representing a mask, and positive and negative indices of the mask tensor to be sampled, this sets randomly sampled indices of the mask tensor to 0.
@@ -80,22 +50,6 @@ def suppress_random(mask, pos_indices, neg_indices, max_regions):
         mask[neg_indices[0][suppressed_region_indices], neg_indices[1][suppressed_region_indices], neg_indices[2][suppressed_region_indices]] = 0
     return mask
 
-"""
-    Helper function for parameterizing targets for regression
-"""
-def target_calc_helper(box_coordinates, anchor_coordinates):
-    gt_box_x_center = (box_coordinates[3] + box_coordinates[0]) / 2
-    gt_box_y_center = (box_coordinates[1] + box_coordinates[2]) / 2
-    anchor_x_center = (anchor_coordinates[1] + anchor_coordinates[0]) / 2
-    anchor_y_center = (anchor_coordinates[2] + anchor_coordinates[3]) / 2
-    anchor_width = anchor_coordinates[1] - anchor_coordinates[0]
-    anchor_height = anchor_coordinates[3] - anchor_coordinates[2]
-
-    tx = (gt_box_x_center - anchor_x_center) / anchor_width
-    ty = (gt_box_y_center - anchor_y_center) / anchor_height
-    tw = np.log((box_coordinates[3] - box_coordinates[0]) / anchor_width)
-    th = np.log((box_coordinates[2] - box_coordinates[1]) / anchor_height) 
-    return [tx, ty, tw, th]
 
 """
     Helper to scale the coordinates properly.
@@ -103,6 +57,7 @@ def target_calc_helper(box_coordinates, anchor_coordinates):
 
 def generate_scaled_gt_coordinates(bbox_list, old_width, old_height, new_width, new_height):
     # (x, y, h, w) vectors for each bounding box, scaled to the resized dimension
+    if len(bbox_list) == 0: return np.zeros((1, 4))
     gt = np.zeros((len(bbox_list), 4))
     for bbox_index, bbox_info in enumerate(bbox_list):
         gt[bbox_index, 0] = int(bbox_info[1], 10) * new_width / float(old_width)
@@ -250,33 +205,36 @@ class DataProvider():
     def _compile_data_for_single_image(self, i, image_dir, filename, extension=".jpg"):
         self.all_images[filename] = {}
         curr_img = cv2.imread(image_dir + filename + extension)
-        self.all_images[filename]["orig_height"] = curr_img.shape[0] # because, awesomely, OpenCV is width then height. Yay.
+        self.all_images[filename]["orig_height"] = curr_img.shape[0] 
         self.all_images[filename]["orig_width"] = curr_img.shape[1]
         curr_img_bbox_and_classes = self.image_bbox_info[i]
         self.all_images[filename]["bbox_and_classes"] = curr_img_bbox_and_classes
-        self.all_images[filename]["anchor_labels"] = self.get_image_rpns(curr_img.shape[0], curr_image.shape[1], curr_img_bbox_and_classes, C)
 
 
-    def get_image_rpns(self, orig_width, orig_height, image_bbox_info, img_dimension_calc_fn, C):
+    def get_image_rpns(self, orig_width, orig_height, image_bbox_info, filename, img_dimension_calc_fn, C, show_progress=True, preview_image=False):
         resized_img_width, resized_img_height = C._img_size[:2]
         fmap_output_width, fmap_output_height = img_dimension_calc_fn(resized_img_width, resized_img_height) 
-        num_bboxes = len(image_bbox_info)
+
+        if image_bbox_info.size == 0: # if there are no bounding boxes, then everything is zero 
+            return np.zeros((1, fmap_output_height, fmap_output_width, C._num_anchors * 2)), np.zeros((1, fmap_output_height, fmap_output_width, C._num_anchors * 8))
 
         y_is_valid = np.zeros((fmap_output_height, fmap_output_width, C._num_anchors)) # indicator. 1 if IoU > 0.7 or IoU < 0.3. 0 otherwise.
         y_is_obj = np.zeros((fmap_output_height, fmap_output_width, C._num_anchors)) # indicator. 1 if IoU > 0.7, 0 otherwise
         y_rpn_reg = np.zeros((fmap_output_height, fmap_output_width, 4 * C._num_anchors)) # real-valued normalized coordinates
- 
+
         gt_box_coordinates = generate_scaled_gt_coordinates(image_bbox_info, orig_width, orig_height, resized_img_width, resized_img_height)
 
         # auxilliary structures for mapping each ground-truth bounding box to its best anchor
+        num_bboxes = len(image_bbox_info)
         best_anchor_for_bbox = -1 * np.ones((num_bboxes, 4)).astype(int) # indexed by bbox number. 2nd dim is (y-loc, x-loc, anchor_scale_idx, anchor_aspect_ratio_idx)
         best_iou_for_bbox = np.zeros(num_bboxes).astype(np.float32)
         best_coordinates_for_bbox = np.zeros((num_bboxes, 4)).astype(int) 
         best_targets_for_bbox = np.zeros((num_bboxes, 4)).astype(np.float32)
         n_anchors_per_bbox = np.zeros(num_bboxes).astype(int)
 
-        rpn_progressbar = ProgressTracker(range(C._num_anchors * fmap_output_width * fmap_output_height))
-        rpn_progressbar.start()
+        if show_progress:
+            rpn_progressbar = ProgressTracker(range(C._num_anchors * fmap_output_width * fmap_output_height))
+            rpn_progressbar.start()
 
         # for each anchor shape...
         for anchor_area_index, anchor_dim in enumerate(C._anchor_box_scales):
@@ -288,18 +246,20 @@ class DataProvider():
 
                 # at every location of the feature map...
                 for ix in range(fmap_output_width):
+                    if show_progress: rpn_progressbar.report("Generating ground-truth regions and regression targets for tensor locations:")
+
                     # calculate anchor coordinates
+
                     x_min = C._rpn_stride * (ix + 0.5) - anchor_width / 2
                     x_max = C._rpn_stride * (ix + 0.5) + anchor_width / 2
 
                     # and discard those out of bounds. The corresponding anchor will thus retain the default (0, 0) label marking it as invalid.
                     if x_min < 0 or x_max > resized_img_width: 
-                        rpn_progressbar.skip_iter(fmap_output_height)
+                        if show_progress: rpn_progressbar.skip_iter(fmap_output_height)
                         continue
 
                     for jy in range(fmap_output_height): 
-                        rpn_progressbar.report("Generating ground-truth regions and regression targets for tensor locations:")
-                        rpn_progressbar.iteration_done()
+                        if show_progress:  rpn_progressbar.iteration_done()
                         y_min = C._rpn_stride * (jy + 0.5) - anchor_height / 2
                         y_max = C._rpn_stride * (jy + 0.5) + anchor_height / 2
 
@@ -320,8 +280,11 @@ class DataProvider():
 
                         """
                         for bbox_index in range(gt_box_coordinates.shape[0]):
-                            curr_iou = iou([gt_box_coordinates[bbox_index, 0], gt_box_coordinates[bbox_index, 1],
-                                gt_box_coordinates[bbox_index, 3], gt_box_coordinates[bbox_index, 2]], [x_min, y_min, x_max, y_max])
+                            gt_coordinates = [gt_box_coordinates[bbox_index, 0], gt_box_coordinates[bbox_index, 1],
+                                gt_box_coordinates[bbox_index, 3], gt_box_coordinates[bbox_index, 2]]
+                            anchor_coordinates = [x_min, y_min, x_max, y_max]
+
+                            curr_iou = iou(gt_coordinates, anchor_coordinates)
                             curr_reg_targets = target_calc_helper(gt_box_coordinates[bbox_index, :], [x_min, x_max, y_min, y_max])
 
                             """
@@ -363,6 +326,7 @@ class DataProvider():
             Unless the ground-truth box is nowhere near any anchors. That means you have bigger design flaws in your project to deal with.
         """
         y_is_valid, y_is_obj, y_rpn_reg = self._ensure_gt_to_anchor_mapping(y_is_valid, y_is_obj, y_rpn_reg, n_anchors_per_bbox, best_anchor_for_bbox, best_targets_for_bbox, C)
+        if preview_image: display_best_anchor_mapping(filename, gt_box_coordinates, best_anchor_for_bbox, C)
 
         """
             We know that there are many more negative anchors than positive anchors, because given an image, it's unlikely that there are objects of interest
@@ -379,9 +343,14 @@ class DataProvider():
 
         y_rpn_cls = np.expand_dims(np.concatenate([y_is_obj, y_is_valid], axis=2), axis=0) # so these can be concatenated with the results from other images along axis 0
         y_rpn_reg = np.expand_dims(np.concatenate([np.repeat(y_is_valid, 4, axis=2), y_rpn_reg], axis=2), axis=0)
-        print("Regression target tensor shape:",y_rpn_reg.shape)
-        print("Classification target tensor shape:",y_rpn_cls.shape)
+
+        cls_shape = (1, fmap_output_height, fmap_output_width, C._num_anchors * 2)
+        reg_shape = (1, fmap_output_height, fmap_output_width, C._num_anchors * 8)
+
+        assert y_rpn_cls.shape == cls_shape, "Expected shape {} but got {}".format(str(cls_shape), str(y_rpn_cls.shape))
+        assert y_rpn_reg.shape == reg_shape, "Expected shape {} but got {}".format(str(reg_shape), str(y_rpn_reg.shape))
         return np.copy(y_rpn_cls), np.copy(y_rpn_reg)
+
 
     def _update_gt_labels(self, bbox_type, mask, cls, reg, h, w, anchor, tgt_val=None):
         if bbox_type is Object.POS:
@@ -413,17 +382,47 @@ class DataProvider():
                     print("Warning: Bounding Box #{} does not have any anchors that overlap. Consider changing anchor sizes.".format(bbox_index))
         return mask, cls, reg
 
+    def get_all_image_rpns(self, preview_images=[], C):
+        self.all_cls = []
+        self.all_reg = []
+        image_rpn_progress_bar = ProgressTracker(self.df_train.iloc[:, 2])
+        image_rpn_progress_bar.start()
+        for idx, filename in self.df_train.iloc[:, 1].items():
+            image_rpn_progress_bar.report("Calculating anchor labels and targets for all images:")
+            img_info = self.all_images[filename]
+            cls, reg = self.get_image_rpns(img_info["orig_width"], img_info["orig_height"], img_info["bbox_and_classes"], filename, example_calc_fn, C, show_progress=False, preview_image=(idx in preview_images))
+            self.all_cls.append(cls)
+            self.all_reg.append(reg)
+            image_rpn_progress_bar.iteration_done()
+        self.all_cls = np.array(all_cls)
+        self.all_reg = np.array(all_reg)
+        print()
+        print("Class label array shape:", all_cls.shape())
+        print("Regression label array shape:", all_reg.shape())
+        return self.all_cls, self.all_reg
+
 def example_calc_fn(dim0, dim1):
     return (dim0 // 16, dim1 // 16)
-
-def project_anchors_on_image(img, C):
-    C._num_anchors
-
 
 if  __name__ == '__main__':
     d = DataProvider()
     C = Settings()
+    
     test_image_name = d.df_train.iloc[0, 1]
     img_width = d.all_images[test_image_name]["orig_width"]
     img_height = d.all_images[test_image_name]["orig_height"]
-    cls, reg = d.get_image_rpns(img_width, img_height, d.image_bbox_info[0], example_calc_fn, C)
+    bboxes = d.all_images[test_image_name]["bbox_and_classes"]
+    #plt.figure(figsize=(15, 15))
+    #plt.title("Anchor project - " + test_image_name)
+    #plt.imshow(project_anchors(test_image_name, example_calc_fn, C))
+    #plt.show()
+
+    #cls, reg = d.get_image_rpns(img_width, img_height, bboxes, test_image_name, example_calc_fn, C)
+    cls, reg = d.get_all_image_rpns(C)
+
+    with open("./rpn_cls.pkl", "wb+") as f:
+        pickle.dump(cls, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with open("./rpn_reg.pkl", "wb+") as f:
+        pickle.dump(reg, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
