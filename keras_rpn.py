@@ -83,19 +83,23 @@ def classifier_layer(shared_layers, rois, num_rois, n_classes):
 
     return [final_cls, final_reg]
 
-data = DataProvider()
+def build_rpn(base, verbose=True):
+    rpn_layer = rpn(base)
 
-roi_input = Input(shape=(C._max_num_rois, 4))
-nn_base = vgg_base(shape_tuple=C._img_size)
-rpn_layer = rpn(nn_base)
+    rpn_model = Model(inputs=base.input, outputs=rpn_layer, name="region_proposal")
+    rpn_model.compile(optimizer='sgd', loss=[rpn_cls_loss(C._num_anchors), rpn_reg_loss(C._num_anchors)])
+    if verbose: rpn_model.summary()
+    return rpn_model
 
 
-rpn_model = Model(inputs=nn_base.input, outputs=rpn_layer, name="region_proposal")
-rpn_model.compile(optimizer='sgd', loss=[rpn_cls_loss(C._num_anchors), rpn_reg_loss(C._num_anchors)])
-rpn_model.summary()
+if __name__ == '__main__':
+    data = DataProvider()
+ 
+    nn_base = vgg_base(shape_tuple=C._img_size)
+    rpn_model = build_rpn(nn_base)
 
-classifier = classifier_layer(nn_base, roi_input, C._max_num_rois, data.n_classes)
-big_boi_classifier = Model(inputs=[nn_base.input, roi_input], outputs=classifier, name="roi_fast_rcnn_classifier")
-big_boi_classifier.compile(optimizer='sgd', loss=[full_model_classifier_loss(), full_model_regression_loss(data.n_classes)])
-big_boi_classifier.summary()
-
+    roi_input = Input(shape=(C._max_num_rois, 4))
+    classifier = classifier_layer(nn_base, roi_input, C._max_num_rois, data.n_classes)
+    big_boi_classifier = Model(inputs=[nn_base.input, roi_input], outputs=classifier, name="roi_fast_rcnn_classifier")
+    big_boi_classifier.compile(optimizer='sgd', loss=[full_model_classifier_loss(), full_model_regression_loss(data.n_classes)])
+    big_boi_classifier.summary()

@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 import cv2
 import random
+import os
 
 from collections import Counter
 import operator
@@ -23,6 +24,7 @@ from labeling_utils import *
 from visualization import *
 
 from enum import Enum, auto, unique
+from sparsify import sparsify
 import matplotlib.pyplot as plt
 
 @unique
@@ -226,11 +228,11 @@ class DataProvider():
 
         # auxilliary structures for mapping each ground-truth bounding box to its best anchor
         num_bboxes = len(image_bbox_info)
-        best_anchor_for_bbox = -1 * np.ones((num_bboxes, 4)).astype(int) # indexed by bbox number. 2nd dim is (y-loc, x-loc, anchor_scale_idx, anchor_aspect_ratio_idx)
+        best_anchor_for_bbox = -1 * np.ones((num_bboxes, 4)).astype(np.int8) # indexed by bbox number. 2nd dim is (y-loc, x-loc, anchor_scale_idx, anchor_aspect_ratio_idx)
         best_iou_for_bbox = np.zeros(num_bboxes).astype(np.float32)
-        best_coordinates_for_bbox = np.zeros((num_bboxes, 4)).astype(int) 
+        best_coordinates_for_bbox = np.zeros((num_bboxes, 4)).astype(np.int8) 
         best_targets_for_bbox = np.zeros((num_bboxes, 4)).astype(np.float32)
-        n_anchors_per_bbox = np.zeros(num_bboxes).astype(int)
+        n_anchors_per_bbox = np.zeros(num_bboxes).astype(np.int8)
 
         if show_progress:
             rpn_progressbar = ProgressTracker(range(C._num_anchors * fmap_output_width * fmap_output_height))
@@ -382,7 +384,7 @@ class DataProvider():
                     print("Warning: Bounding Box #{} does not have any anchors that overlap. Consider changing anchor sizes.".format(bbox_index))
         return mask, cls, reg
 
-    def get_all_image_rpns(self, preview_images=[], C):
+    def get_all_image_rpns(self, C, preview_images=[]):
         self.all_cls = []
         self.all_reg = []
         image_rpn_progress_bar = ProgressTracker(self.df_train.iloc[:, 2])
@@ -393,16 +395,23 @@ class DataProvider():
             cls, reg = self.get_image_rpns(img_info["orig_width"], img_info["orig_height"], img_info["bbox_and_classes"], filename, example_calc_fn, C, show_progress=False, preview_image=(idx in preview_images))
             self.all_cls.append(cls)
             self.all_reg.append(reg)
+            with open("./rpn_cls_intermediate.pkl", "wb+") as f:
+                pickle.dump(self.all_cls, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with open("./rpn_reg_intermediate.pkl", "wb+") as f:
+                pickle.dump(self.all_reg, f, protocol=pickle.HIGHEST_PROTOCOL)
+
             image_rpn_progress_bar.iteration_done()
-        self.all_cls = np.array(all_cls)
-        self.all_reg = np.array(all_reg)
+        self.all_cls = np.array(self.all_cls)
+        self.all_reg = np.array(self.all_reg)
         print()
-        print("Class label array shape:", all_cls.shape())
-        print("Regression label array shape:", all_reg.shape())
+        print("Class label array shape:", self.all_cls[0].shape)
+        print("Regression label array shape:", self.all_reg[0].shape)
         return self.all_cls, self.all_reg
 
 def example_calc_fn(dim0, dim1):
     return (dim0 // 16, dim1 // 16)
+
+
 
 if  __name__ == '__main__':
     d = DataProvider()
@@ -418,7 +427,16 @@ if  __name__ == '__main__':
     #plt.show()
 
     #cls, reg = d.get_image_rpns(img_width, img_height, bboxes, test_image_name, example_calc_fn, C)
-    cls, reg = d.get_all_image_rpns(C)
+    if not os.path.isfile("./rpn_cls.pkl") or not os.path.isfile("./rpn_reg.pkl"):
+        cls, reg = d.get_all_image_rpns(C)
+    cls = np.concatenate(cls)
+    reg = np.concatenate(reg)
+    print("Class label array shape:", self.cls[0].shape)
+    print("Regression label array shape:", self.reg[0].shape)
+
+    #cls_compressed = sparsify(cls)
+    #reg_compressed = sparsify(cls)
+    
 
     with open("./rpn_cls.pkl", "wb+") as f:
         pickle.dump(cls, f, protocol=pickle.HIGHEST_PROTOCOL)
